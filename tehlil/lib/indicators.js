@@ -99,6 +99,91 @@ export function calculateBollingerBands(closes, period = 20, multiplier = 2) {
 }
 
 /**
+ * Detects swing-high/swing-low fractals and clusters nearby ones into
+ * support/resistance levels. `strength` is the number of touches in a cluster.
+ */
+export function calculateSupportResistance(candles, options = {}) {
+  const { window = 5, tolerancePercent = 0.5, maxLevels = 3 } = options;
+  if (candles.length < window * 2 + 1) return { support: [], resistance: [] };
+
+  const swingHighs = [];
+  const swingLows = [];
+
+  for (let i = window; i < candles.length - window; i++) {
+    const slice = candles.slice(i - window, i + window + 1);
+    if (slice.every((c) => c.high <= candles[i].high)) swingHighs.push(candles[i].high);
+    if (slice.every((c) => c.low >= candles[i].low)) swingLows.push(candles[i].low);
+  }
+
+  function cluster(levels) {
+    const sorted = [...levels].sort((a, b) => a - b);
+    const clusters = [];
+    for (const level of sorted) {
+      const last = clusters[clusters.length - 1];
+      if (last && (Math.abs(level - last.avg) / last.avg) * 100 <= tolerancePercent) {
+        last.sum += level;
+        last.count += 1;
+        last.avg = last.sum / last.count;
+      } else {
+        clusters.push({ sum: level, count: 1, avg: level });
+      }
+    }
+    return clusters.map((c) => ({ price: c.avg, strength: c.count }));
+  }
+
+  const currentPrice = candles[candles.length - 1].close;
+
+  const resistance = cluster(swingHighs)
+    .filter((l) => l.price > currentPrice)
+    .sort((a, b) => a.price - b.price)
+    .slice(0, maxLevels)
+    .map((l) => ({ price: round(l.price, 6), strength: l.strength, type: "resistance" }));
+
+  const support = cluster(swingLows)
+    .filter((l) => l.price < currentPrice)
+    .sort((a, b) => b.price - a.price)
+    .slice(0, maxLevels)
+    .map((l) => ({ price: round(l.price, 6), strength: l.strength, type: "support" }));
+
+  return { support, resistance };
+}
+
+/**
+ * Trims candles + overlay series to the last `limit` points for charting,
+ * plus the support/resistance levels computed over the full history.
+ */
+export function buildChartData(candles, options = {}) {
+  const { limit = 90 } = options;
+  const closes = candles.map((c) => c.close);
+
+  const ema20 = calculateEMA(closes, 20);
+  const ema50 = calculateEMA(closes, 50);
+  const bb = calculateBollingerBands(closes, 20, 2);
+  const { support, resistance } = calculateSupportResistance(candles);
+
+  const start = Math.max(0, candles.length - limit);
+  const trimRound = (series) => series.slice(start).map((v) => (v != null ? round(v, 6) : null));
+
+  return {
+    candles: candles.slice(start).map((c) => ({
+      time: c.time,
+      open: round(c.open, 6),
+      high: round(c.high, 6),
+      low: round(c.low, 6),
+      close: round(c.close, 6),
+    })),
+    ema20: trimRound(ema20),
+    ema50: trimRound(ema50),
+    bollinger: {
+      upper: trimRound(bb.upper),
+      middle: trimRound(bb.middle),
+      lower: trimRound(bb.lower),
+    },
+    supportResistance: [...resistance, ...support],
+  };
+}
+
+/**
  * Reduces a candle series to the latest indicator readings plus
  * human-readable (Arabic) status labels — the shape sent to the UI and to Claude.
  */

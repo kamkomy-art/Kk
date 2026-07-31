@@ -19,11 +19,11 @@ export async function searchCoins(query) {
   return response.json();
 }
 
-export async function analyzeSymbol(symbol) {
+export async function analyzeSymbol(symbol, interval = "4h") {
   const response = await fetch("/api/analyze", {
     method: "POST",
     headers: { "content-type": "application/json" },
-    body: JSON.stringify({ symbol }),
+    body: JSON.stringify({ symbol, interval }),
   });
   const data = await response.json();
   if (!response.ok) {

@@ -2,7 +2,7 @@ import "dotenv/config";
 import express from "express";
 import { Readable } from "node:stream";
 import { fetchKlines, fetch24hrTicker, searchSymbols } from "./lib/binance.js";
-import { analyzeCandles } from "./lib/indicators.js";
+import { analyzeCandles, buildChartData } from "./lib/indicators.js";
 
 const PORT = 8787;
 const ANTHROPIC_API_URL = "https://api.anthropic.com/v1/messages";
@@ -13,6 +13,9 @@ const ANALYSIS_MODEL = "claude-opus-5";
 const WATCHLIST = ["BTCUSDT", "ETHUSDT", "BNBUSDT", "SOLUSDT", "XRPUSDT"];
 const WATCHLIST_CACHE_TTL_MS = 20_000;
 let watchlistCache = { data: null, fetchedAt: 0 };
+
+const ALLOWED_INTERVALS = new Set(["1h", "4h", "1d"]);
+const DEFAULT_INTERVAL = "4h";
 
 const app = express();
 app.use(express.json({ limit: "25mb" }));
@@ -94,6 +97,7 @@ app.get("/api/watchlist", async (_req, res) => {
           rsi: indicators.rsi,
           rsiStatus: indicators.rsiStatus,
           trend: indicators.trend,
+          macdStatus: indicators.macdStatus,
         };
       }),
     );
@@ -124,6 +128,8 @@ app.get("/api/search", async (req, res) => {
 // ---------------------------------------------------------------------------
 app.post("/api/analyze", async (req, res) => {
   const symbol = String(req.body?.symbol ?? "").trim().toUpperCase();
+  const interval = ALLOWED_INTERVALS.has(req.body?.interval) ? req.body.interval : DEFAULT_INTERVAL;
+
   if (!symbol) {
     res.status(400).json({ error: "الرجاء تحديد رمز عملة صالح (مثال: BTCUSDT)" });
     return;
@@ -133,7 +139,7 @@ app.post("/api/analyze", async (req, res) => {
   let ticker;
   try {
     [klines, ticker] = await Promise.all([
-      fetchKlines(symbol, "4h", 210),
+      fetchKlines(symbol, interval, 210),
       fetch24hrTicker(symbol),
     ]);
   } catch (err) {
@@ -143,6 +149,7 @@ app.post("/api/analyze", async (req, res) => {
   }
 
   const indicators = analyzeCandles(klines);
+  const chartData = buildChartData(klines, { limit: 90 });
   const changePercent = parseFloat(ticker.priceChangePercent);
 
   const apiKey = getApiKey(res);
@@ -154,7 +161,7 @@ app.post("/api/analyze", async (req, res) => {
     "- اشرح ماذا تعني كل إشارة (RSI، MACD، المتوسطات المتحركة، بولينجر باند) بالنسبة لحالة السوق الحالية.",
     "- وضّح إن كانت الإشارات متوافقة (تدعم بعضها) أو متضاربة.",
     "- لا تُصدر توصية مباشرة بالشراء أو البيع — قدّم قراءة محايدة للمعطيات فقط.",
-    "- اختم دائمًا بجملة توضح أن هذا تحليل معلوماتي وليس نصيحة استثمارية، وأن القرار النهائي يعود للمستخدم.",
+    "- لا تكتب إخلاء مسؤولية أو تحذيرًا في نهاية ردك — الواجهة تعرض ذلك تلقائيًا؛ ركّز فقط على تفسير المؤشرات.",
     "اجعل الرد موجزًا (فقرة إلى فقرتين).",
   ].join("\n");
 
@@ -191,9 +198,11 @@ app.post("/api/analyze", async (req, res) => {
       res.status(upstream.status).json({
         error: data?.error?.message || "خطأ من واجهة Anthropic",
         symbol,
+        interval,
         price: indicators.price,
         changePercent,
         indicators,
+        chartData,
       });
       return;
     }
@@ -202,14 +211,24 @@ app.post("/api/analyze", async (req, res) => {
 
     res.json({
       symbol,
+      interval,
       price: indicators.price,
       changePercent,
       indicators,
+      chartData,
       analysis,
     });
   } catch (err) {
     console.error("فشل استدعاء Anthropic API:", err);
-    res.status(502).json({ error: "تعذر الاتصال بواجهة Anthropic API" });
+    res.status(502).json({
+      error: "تعذر الاتصال بواجهة Anthropic API",
+      symbol,
+      interval,
+      price: indicators.price,
+      changePercent,
+      indicators,
+      chartData,
+    });
   }
 });
 

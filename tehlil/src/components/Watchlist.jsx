@@ -1,12 +1,15 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { getWatchlist } from "../api/client.js";
+import { ALERTABLE_STATUSES, getWatchedSymbols, toggleWatched } from "../lib/alertStore.js";
 
 const REFRESH_MS = 30_000;
 
-export default function Watchlist({ selectedSymbol, onSelect }) {
+export default function Watchlist({ selectedSymbol, onSelect, onAlert }) {
   const [items, setItems] = useState([]);
   const [error, setError] = useState(null);
   const [loading, setLoading] = useState(true);
+  const [watched, setWatched] = useState(() => getWatchedSymbols());
+  const prevStatusRef = useRef({});
 
   useEffect(() => {
     let cancelled = false;
@@ -14,14 +17,36 @@ export default function Watchlist({ selectedSymbol, onSelect }) {
     async function load() {
       try {
         const data = await getWatchlist();
-        if (!cancelled) {
-          setItems(data.items);
-          setError(null);
-        }
+        if (cancelled) return;
+
+        checkAlerts(data.items);
+        setItems(data.items);
+        setError(null);
       } catch (err) {
         if (!cancelled) setError(err.message);
       } finally {
         if (!cancelled) setLoading(false);
+      }
+    }
+
+    function checkAlerts(nextItems) {
+      const currentlyWatched = getWatchedSymbols();
+      for (const item of nextItems) {
+        if (!currentlyWatched.includes(item.symbol)) continue;
+
+        for (const [field, label] of [
+          ["rsiStatus", "RSI"],
+          ["macdStatus", "MACD"],
+        ]) {
+          const status = item[field];
+          const prevKey = `${item.symbol}:${field}`;
+          const prevStatus = prevStatusRef.current[prevKey];
+          prevStatusRef.current[prevKey] = status;
+
+          if (status !== prevStatus && ALERTABLE_STATUSES.has(status)) {
+            onAlert?.(`${item.symbol.replace("USDT", "")} — ${label}: ${status}`);
+          }
+        }
       }
     }
 
@@ -31,7 +56,12 @@ export default function Watchlist({ selectedSymbol, onSelect }) {
       cancelled = true;
       clearInterval(timer);
     };
-  }, []);
+  }, [onAlert]);
+
+  function handleToggleWatch(e, symbol) {
+    e.stopPropagation();
+    setWatched(toggleWatched(symbol));
+  }
 
   if (loading) return <p style={styles.hint}>جارٍ تحميل قائمة المتابعة…</p>;
   if (error) return <p style={styles.error}>⚠️ {error}</p>;
@@ -40,6 +70,7 @@ export default function Watchlist({ selectedSymbol, onSelect }) {
     <div style={styles.grid}>
       {items.map((item) => {
         const isUp = item.changePercent >= 0;
+        const isWatchedNow = watched.includes(item.symbol);
         return (
           <button
             key={item.symbol}
@@ -51,11 +82,20 @@ export default function Watchlist({ selectedSymbol, onSelect }) {
           >
             <div style={styles.cardHeader}>
               <span style={styles.symbol}>{item.symbol.replace("USDT", "")}</span>
+              <span
+                onClick={(e) => handleToggleWatch(e, item.symbol)}
+                style={{ ...styles.bell, opacity: isWatchedNow ? 1 : 0.35 }}
+                title={isWatchedNow ? "إيقاف تنبيهات هذه العملة" : "تفعيل تنبيهات هذه العملة"}
+              >
+                {isWatchedNow ? "🔔" : "🔕"}
+              </span>
+            </div>
+            <div style={styles.priceRow}>
+              <span style={styles.price}>{item.price}</span>
               <span style={{ ...styles.change, color: isUp ? "#3fb950" : "#f85149" }}>
                 {isUp ? "▲" : "▼"} {Math.abs(item.changePercent).toFixed(2)}%
               </span>
             </div>
-            <div style={styles.price}>{item.price}</div>
             <div style={styles.badge}>
               RSI {item.rsi ?? "—"} · {item.rsiStatus}
             </div>
@@ -83,7 +123,7 @@ const styles = {
     fontFamily: "inherit",
   },
   cardActive: {
-    borderColor: "#1f6feb",
+    border: "1px solid #1f6feb",
     backgroundColor: "#132038",
   },
   cardHeader: {
@@ -93,8 +133,15 @@ const styles = {
     marginBottom: 6,
   },
   symbol: { fontWeight: 700, fontSize: 15 },
+  bell: { fontSize: 13, cursor: "pointer" },
+  priceRow: {
+    display: "flex",
+    justifyContent: "space-between",
+    alignItems: "baseline",
+    marginBottom: 6,
+  },
+  price: { fontSize: 16 },
   change: { fontSize: 12, fontWeight: 600 },
-  price: { fontSize: 16, marginBottom: 6 },
   badge: {
     fontSize: 11,
     color: "#9aa4b8",
